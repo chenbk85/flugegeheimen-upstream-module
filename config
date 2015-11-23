@@ -1,0 +1,5 @@
+ngx_addon_name=ngx_flug_upstream_module
+HTTP_MODULES="$HTTP_MODULES ngx_http_flug_upstream_module"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/flug_upstream_module.c"
+
+

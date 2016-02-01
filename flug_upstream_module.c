@@ -69,7 +69,7 @@ static void flug_log_numeric_parameter (const char * name, uint32_t number) {
 	}
 
 	flug_log_timestamp(log);
-	fprintf (log, "%s: %u\n",  name, number);
+	fprintf (log, "%s: %u\n", name, number);
 
 	fclose(log);
 
@@ -84,11 +84,15 @@ typedef struct {
 
 //Module context struct
 typedef struct flug_request_context_s {
-	uint32_t sent;
 	uint32_t size;
-	ngx_int_t initDone: 1;
+	uint32_t sent;
+	bool initDone;
 } flug_request_context_t;
 
+typedef struct flug_filter_context_s {
+	ngx_http_request_t * r;
+	ngx_http_upstream_t * u;
+} flug_filter_context_t;
 
 void * flug_create_loc_conf (ngx_conf_t * cf);
 
@@ -163,7 +167,7 @@ static ngx_http_module_t * flug_get_context (ngx_http_request_t * r) {
 
 static ngx_int_t flug_resolve_upstream (ngx_http_upstream_resolved_t * resolved) {
 	int ret;
-	int sfd = -1;
+	//int sfd = -1;
 	bool connected = false;
 	struct addrinfo hints, *results;
 	struct addrinfo *rp;
@@ -179,7 +183,7 @@ static ngx_int_t flug_resolve_upstream (ngx_http_upstream_resolved_t * resolved)
 		return -1;
 	}
 	for (rp = results; rp != NULL; rp = rp->ai_next) {
-		sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+		/*sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 		if (sfd == -1)
 			continue;
 		if (connect(sfd, rp->ai_addr, rp->ai_addrlen) != -1) {
@@ -191,7 +195,14 @@ static ngx_int_t flug_resolve_upstream (ngx_http_upstream_resolved_t * resolved)
 
 			connected = true;
 			break;                  // Success 
-		}
+		}*/
+		resolved->sockaddr = rp->ai_addr;
+		resolved->socklen = rp->ai_addrlen;
+		resolved->naddrs = 1;
+
+		connected = true;
+		break;                  // Success 
+
 	}
 
 	if (!connected) {
@@ -203,13 +214,91 @@ static ngx_int_t flug_resolve_upstream (ngx_http_upstream_resolved_t * resolved)
 
 
 
-/*static ngx_buf_t * flug_wrap_request (ngx_str_t req) {
-	int32_t size = req.len;
+typedef struct {
+	size_t rest;
+	ngx_http_request_t *request;
+	ngx_http_upstream_t *upstream;
+} flug_upstream_filter_ctx;
 
-	return NULL;
-}*/
+
+flug_upstream_filter_ctx * flug_create_filter_context (ngx_http_request_t * r) {
+	if (!r || !r->upstream) {
+		return NULL;
+	}
+
+	flug_upstream_filter_ctx * ctx = 
+			ngx_pcalloc(r->pool, sizeof(flug_upstream_filter_ctx));
+	if (!ctx) {
+		return NULL;
+	}
+
+	ctx->request = r;
+	ctx->upstream = r->upstream;
+
+	return ctx;
+}
 
 
+static ngx_int_t flug_upstream_filter_init(void *data) {
+	flug_log_cstr("flug_upstream_input_filter_init");
+	if (!data) {
+		return NGX_ERROR;
+	}
+
+	//get context from data pointer
+	flug_upstream_filter_ctx * ctx = data;
+	//setup content length 
+	ngx_http_upstream_t * u = ctx->upstream;
+
+	
+	u->length = u->headers_in.content_length_n;
+	return NGX_OK;
+}
+
+
+static ngx_int_t flug_upstream_filter(void *data, ssize_t bytes) {
+    u_char               *last;
+    ngx_buf_t            *b;
+    ngx_chain_t          *cl, **ll;
+
+	flug_log_cstr("flug_upstream_input_filter");
+	if (!data) {
+		return NGX_ERROR;
+	}
+
+	//get context from data pointer
+	flug_upstream_filter_ctx * ctx = data;
+	//setup content length 
+	ngx_http_upstream_t * u = ctx->upstream;
+	b = &u->buffer;
+
+
+    for (cl = u->out_bufs, ll = &u->out_bufs; cl; cl = cl->next) {
+        ll = &cl->next;
+    }
+	
+    cl = ngx_chain_get_free_buf(ctx->request->pool, &u->free_bufs);
+    if (cl == NULL) {
+        return NGX_ERROR;
+    }
+
+    cl->buf->flush = 1;
+    cl->buf->memory = 1;
+
+    *ll = cl;
+
+    last = b->last;
+    cl->buf->pos = last;
+    b->last += bytes;
+    cl->buf->last = b->last;
+    cl->buf->tag = u->output.tag;
+
+	u->length -= bytes;
+	if (u->length == 0) {
+		u->keepalive = 1;
+	}
+	return NGX_OK;
+}
 
 static ngx_int_t flug_chain_to_str (ngx_http_request_t * r,
 								ngx_chain_t * chain,
@@ -242,8 +331,12 @@ static ngx_int_t flug_upstream_process_header(ngx_http_request_t * r) {
 	flug_log_cstr("flug_upstream_process_header");
 	rawSize = u->buffer.last - u->buffer.pos;
 	flug_log_numeric_parameter("Size of data transmited by upstream", rawSize);
+	if (rawSize < sizeof(uint32_t)) {
+		return NGX_ERROR;
+	}
 	flug_log_numeric_parameter("Size of data by start/end pair", 
 			(uint32_t)(u->buffer.end - u->buffer.start));
+
 
 	flug_request_context_t * ctx = 
 			ngx_http_get_module_ctx(r, ngx_http_flug_upstream_module);
@@ -262,8 +355,10 @@ static ngx_int_t flug_upstream_process_header(ngx_http_request_t * r) {
 	u->state->status = NGX_HTTP_OK;
 	u->headers_in.status_n = NGX_HTTP_OK;
 
-	//u->length = respSize + sizeof(uint32_t);
-	u->headers_in.content_length_n = respSize;
+	// The thruth is out there
+	//u->length = 0; //respSize - (u->buffer.last - u->buffer.pos) + 1;
+	u->headers_in.content_length_n = (off_t)respSize;
+	//u->keepalive = 1;
 
 
 	return NGX_OK;
@@ -292,7 +387,6 @@ static flug_request_context_t * flug_upstream_new_request_ctx (ngx_http_request_
 }
 
 static ngx_int_t flug_upstream_create_request(ngx_http_request_t * r) {
-	//ngx_str_t dummyRequest = ngx_string("{\"subsystem\":\"asdfasd\"}");
 	ngx_int_t err;
 	ngx_str_t postData = {0, NULL};
 	ngx_buf_t * upstream_buf;
@@ -328,6 +422,7 @@ static ngx_int_t flug_upstream_create_request(ngx_http_request_t * r) {
 	ngx_memcpy(upstream_buf->pos + sizeof(uint32_t), postData.data, postData.len);
 	ngx_memcpy(upstream_buf->pos, (u_char*)&upstream_len, sizeof(uint32_t));
 	upstream_buf->last = upstream_buf->pos + upstream_len + sizeof(uint32_t);
+
 	
 
 	r->upstream->request_bufs->buf = upstream_buf;
@@ -340,12 +435,6 @@ static ngx_int_t flug_upstream_create_request(ngx_http_request_t * r) {
 
 	return NGX_OK;
 }
-
-ngx_int_t flug_upstream_input_filter (void * data, ssize_t bytes) {
-	flug_log_cstr("flug_upstream_input_filter");
-	return NGX_OK;
-}
-
 void flug_upstream_abort_request (ngx_http_request_t * r) {
 	flug_log_cstr("ERROR! flug_upstream_abort_request");
 }
@@ -353,6 +442,7 @@ void flug_upstream_abort_request (ngx_http_request_t * r) {
 ngx_int_t flug_upstream_reinit_request () {
 	return NGX_ERROR;
 }
+
 
 //Setup the connection details like as sockaddr/socklen structs
 static ngx_int_t flug_setup_upstream (ngx_http_request_t * r, ngx_http_module_t * ctx) {
@@ -363,7 +453,6 @@ static ngx_int_t flug_setup_upstream (ngx_http_request_t * r, ngx_http_module_t 
 		flug_log_cstr("Failed to create upstream");
 		return NGX_ERROR;
 	}
-
 
 	flug_upstream_conf_t *mycf = (flug_upstream_conf_t*)
 			ngx_http_get_module_loc_conf(r,ngx_http_flug_upstream_module);
@@ -399,19 +488,22 @@ static ngx_int_t flug_setup_upstream (ngx_http_request_t * r, ngx_http_module_t 
 	u->create_request = flug_upstream_create_request;
 	u->process_header = flug_upstream_process_header;
 	u->finalize_request = flug_upstream_finalize_request;
-	
-	//u->input_filter = flug_upstream_input_filter;
-	//u->abort_request = flug_upstream_abort_request;
-	//u->reinit_request = flug_upstream_reinit_request;
 
 	r->upstream = u;
+
+	u->input_filter_init = flug_upstream_filter_init;
+	u->input_filter = flug_upstream_filter;
+	u->input_filter_ctx = flug_create_filter_context(r);
+	//if (!u->input_filter_ctx) {
+	//	return NGX_ERROR;
+	//}
 
 	return NGX_OK;
 }
 
 //Main request handler
 static ngx_int_t flug_request_handler (ngx_http_request_t * r) {
-	flug_log_cstr("flug_request_handler");
+	flug_log_cstr("\n\nflug_request_handler");
 	ngx_int_t rc;
 	ngx_http_module_t * ctx;
 
@@ -433,6 +525,7 @@ static ngx_int_t flug_request_handler (ngx_http_request_t * r) {
 
 	flug_log_cstr ("request_body() handled with upstream_init");
 	rc = ngx_http_read_client_request_body(r, ngx_http_upstream_init);
+
 	if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
 		flug_log_cstr("Special response");
 		return rc;

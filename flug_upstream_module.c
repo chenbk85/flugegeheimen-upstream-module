@@ -257,9 +257,9 @@ static ngx_int_t flug_upstream_filter_init(void *data) {
 
 
 static ngx_int_t flug_upstream_filter(void *data, ssize_t bytes) {
-    u_char               *last;
-    ngx_buf_t            *b;
-    ngx_chain_t          *cl, **ll;
+	u_char               *last;
+	ngx_buf_t            *b;
+	ngx_chain_t          *cl, **ll;
 
 	flug_log_cstr("flug_upstream_input_filter");
 	if (!data) {
@@ -292,6 +292,11 @@ static ngx_int_t flug_upstream_filter(void *data, ssize_t bytes) {
     b->last += bytes;
     cl->buf->last = b->last;
     cl->buf->tag = u->output.tag;
+
+	/*cl->buf->pos = b->last;
+	b->last += bytes;
+	cl->buf->last = b->last;
+	cl->buf->tag = u->output.tag;*/
 
 	u->length -= bytes;
 	if (u->length == 0) {
@@ -355,11 +360,7 @@ static ngx_int_t flug_upstream_process_header(ngx_http_request_t * r) {
 	u->state->status = NGX_HTTP_OK;
 	u->headers_in.status_n = NGX_HTTP_OK;
 
-	// The thruth is out there
-	//u->length = 0; //respSize - (u->buffer.last - u->buffer.pos) + 1;
 	u->headers_in.content_length_n = (off_t)respSize;
-	//u->keepalive = 1;
-
 
 	return NGX_OK;
 
@@ -440,6 +441,7 @@ void flug_upstream_abort_request (ngx_http_request_t * r) {
 }
 
 ngx_int_t flug_upstream_reinit_request () {
+	flug_log_cstr("ERROR! flug_reinit_abort_request");
 	return NGX_ERROR;
 }
 
@@ -448,7 +450,7 @@ ngx_int_t flug_upstream_reinit_request () {
 static ngx_int_t flug_setup_upstream (ngx_http_request_t * r, ngx_http_module_t * ctx) {
 
 	flug_log_cstr ("flug_setup_upstream");
-	
+
 	if (ngx_http_upstream_create(r) != NGX_OK) {
 		flug_log_cstr("Failed to create upstream");
 		return NGX_ERROR;
@@ -467,14 +469,14 @@ static ngx_int_t flug_setup_upstream (ngx_http_request_t * r, ngx_http_module_t 
 		flug_log_cstr("r->upstream is null");
 	}
 	u->conf = &mycf->upstream;
+	//u->keepalive = 0;
 	u->buffering = mycf->upstream.buffering;
-	u->resolved = (ngx_http_upstream_resolved_t *) 
-			ngx_palloc(r->pool,sizeof(ngx_http_upstream_resolved_t));
 
 	u->resolved = ngx_palloc(r->pool, sizeof(ngx_http_upstream_resolved_t));
 	if (!u->resolved) {
 		return NGX_ERROR;
 	}
+	u->resolved->ctx = NULL;
 
 
 	if (flug_resolve_upstream(u->resolved) != NGX_OK) {
@@ -484,7 +486,7 @@ static ngx_int_t flug_setup_upstream (ngx_http_request_t * r, ngx_http_module_t 
 
 	u->peer.log = r->connection->log;
 	u->peer.log_error = NGX_ERROR_ERR;
-	
+
 	u->create_request = flug_upstream_create_request;
 	u->process_header = flug_upstream_process_header;
 	u->finalize_request = flug_upstream_finalize_request;
@@ -494,6 +496,7 @@ static ngx_int_t flug_setup_upstream (ngx_http_request_t * r, ngx_http_module_t 
 	u->input_filter_init = flug_upstream_filter_init;
 	u->input_filter = flug_upstream_filter;
 	u->input_filter_ctx = flug_create_filter_context(r);
+	u->keepalive = 1;
 	//if (!u->input_filter_ctx) {
 	//	return NGX_ERROR;
 	//}
@@ -520,7 +523,6 @@ static ngx_int_t flug_request_handler (ngx_http_request_t * r) {
 		return NGX_ERROR;
 	}
 
-	
 	//r->main->count++;  //dafaq iz dat
 
 	flug_log_cstr ("request_body() handled with upstream_init");
@@ -531,7 +533,7 @@ static ngx_int_t flug_request_handler (ngx_http_request_t * r) {
 		return rc;
 	}
 
-	flug_log_cstr("Returning NGX_DONE");
+	flug_log_cstr("Returning NGX_OK");
 	return NGX_OK;
 }
 
@@ -561,13 +563,13 @@ void * flug_create_loc_conf (ngx_conf_t * cf) {
 	loc_conf->upstream.max_temp_file_size = 1024 * 1024 * 1024;
 	loc_conf->upstream.hide_headers = NGX_CONF_UNSET_PTR;
 	loc_conf->upstream.pass_headers = NGX_CONF_UNSET_PTR;
-	
+
 	return loc_conf;
 }
 
 //Handle configuration file command
 static char * flug_config_setup (ngx_conf_t *cf, ngx_command_t *cmd, void* conf) {
-	
+
 	flug_log_cstr("Starting flug_upstream module init");
 
 	ngx_http_core_loc_conf_t *clcf; /* pointer to core location configuration */
@@ -578,8 +580,6 @@ static char * flug_config_setup (ngx_conf_t *cf, ngx_command_t *cmd, void* conf)
 	flug_log_cstr("Finished flug_upstream module init");
 
 	return NGX_CONF_OK;
-
-
 }
 
 
